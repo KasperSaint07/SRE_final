@@ -1,0 +1,73 @@
+global:
+  # How long to wait before re-sending a resolved notification
+  resolve_timeout: 5m
+  # SMTP (email) placeholder — fill with real values
+  smtp_smarthost: "smtp.gmail.com:587"
+  smtp_from: "alerts@example.com"
+  smtp_auth_username: "alerts@example.com"
+  smtp_auth_password: "YOUR_SMTP_PASSWORD"   # use a secret manager in prod
+  smtp_require_tls: true
+
+# ── Templates ────────────────────────────────────────────────────────────────
+templates:
+  - "/etc/alertmanager/templates/*.tmpl"
+
+# ── Routing tree ─────────────────────────────────────────────────────────────
+route:
+  # Default receiver for all alerts
+  receiver: "default-receiver"
+  group_by: ["alertname", "severity", "team"]
+  group_wait:      30s   # wait to batch alerts in the same group
+  group_interval:  5m    # send new alerts every 5 min within the group
+  repeat_interval: 4h    # re-send ongoing alerts every 4 hours
+
+  routes:
+    # Critical alerts → immediate notification
+    - matchers:
+        - severity = critical
+      receiver: "critical-receiver"
+      group_wait: 10s
+      repeat_interval: 1h
+
+    # Warning alerts → less urgent
+    - matchers:
+        - severity = warning
+      receiver: "warning-receiver"
+      repeat_interval: 6h
+
+# ── Inhibition rules ─────────────────────────────────────────────────────────
+inhibit_rules:
+  # If InstanceDown fires, suppress other alerts from the same instance
+  - source_matchers:
+      - alertname = InstanceDown
+    target_matchers:
+      - alertname =~ "HighErrorRate|HighLatency"
+    equal: ["instance"]
+
+# ── Receivers ────────────────────────────────────────────────────────────────
+receivers:
+  - name: "default-receiver"
+    webhook_configs:
+      - url: "http://localhost:5001/webhook"   # replace with your webhook URL
+        send_resolved: true
+        http_config:
+          follow_redirects: true
+
+  - name: "critical-receiver"
+    webhook_configs:
+      - url: "http://localhost:5001/webhook"
+        send_resolved: true
+    # Uncomment and configure for email:
+    # email_configs:
+    #   - to: "oncall-team@example.com"
+    #     send_resolved: true
+    #     headers:
+    #       Subject: "[CRITICAL] {{ .GroupLabels.alertname }}"
+
+  - name: "warning-receiver"
+    webhook_configs:
+      - url: "http://localhost:5001/webhook"
+        send_resolved: true
+    # email_configs:
+    #   - to: "dev-team@example.com"
+    #     send_resolved: true

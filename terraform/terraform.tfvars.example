@@ -1,0 +1,28 @@
+# Copy this file to terraform.tfvars and fill in the values.
+# Never commit terraform.tfvars — it is listed in .gitignore.
+
+aws_region           = "eu-central-1"
+project_name         = "sre-final"
+environment          = "prod"
+
+# EC2 key pair that already exists in your AWS account
+key_pair_name        = "my-key-pair"
+
+# VPC / networking
+vpc_cidr             = "10.0.0.0/16"
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+
+# EC2 instance sizing
+ec2_instance_type    = "t3.micro"
+
+# ASG
+asg_min_size         = 1
+asg_max_size         = 3
+asg_desired_capacity = 1
+
+# CloudWatch scaling thresholds (%)
+cpu_scale_up_threshold   = 70
+cpu_scale_down_threshold = 30
+
+# Restrict SSH to your IP for production (e.g. "203.0.113.10/32")
+allowed_ssh_cidr = "0.0.0.0/0"

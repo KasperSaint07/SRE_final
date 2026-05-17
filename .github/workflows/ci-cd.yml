@@ -1,0 +1,187 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs on the same branch when a new push arrives
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION:      us-east-1
+  ECR_REPOSITORY:  sre-final-app
+  IMAGE_NAME:      sre-final-app
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+# ── Job 1: Test ───────────────────────────────────────────────────────────────
+  test:
+    name: "Test — pytest"
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r app/requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          cd app
+          python -m pytest tests/ -v \
+            --tb=short \
+            --junitxml=../test-results.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: test-results.xml
+
+# ── Job 2: Build & Push to ECR ───────────────────────────────────────────────
+  build-and-push:
+    name: "Build & Push Docker image → ECR"
+    runs-on: ubuntu-22.04
+    needs: test
+    # Only build on main branch pushes (not PRs)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+      ecr-registry: ${{ steps.login-ecr.outputs.registry }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Generate image metadata (tag)
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: sha-${SHORT_SHA}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context:   ./app
+          file:      ./app/Dockerfile
+          push:      true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}"
+          format:    "table"
+          exit-code: "0"           # warn only — set to "1" to fail on HIGH/CRITICAL
+          severity:  "HIGH,CRITICAL"
+
+# ── Job 3: Deploy to EC2 ──────────────────────────────────────────────────────
+  deploy:
+    name: "Deploy → EC2 via SSH"
+    runs-on: ubuntu-22.04
+    needs: build-and-push
+    environment: production      # optional: requires manual approval gate in GitHub
+
+    steps:
+      - name: Checkout code (for compose files)
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:        ${{ secrets.EC2_HOST }}
+          username:    ec2-user
+          key:         ${{ secrets.EC2_SSH_KEY }}
+          port:        22
+          timeout:     120s
+          script: |
+            set -euo pipefail
+
+            APP_DIR="/opt/sre-app"
+            cd "${APP_DIR}"
+
+            # ── Auth to ECR ───────────────────────────────────────────────
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+              | docker login --username AWS --password-stdin \
+                  ${{ needs.build-and-push.outputs.ecr-registry }}
+
+            # ── Update compose env vars ───────────────────────────────────
+            cat > .env <<EOF
+            ECR_REGISTRY=${{ needs.build-and-push.outputs.ecr-registry }}
+            ECR_REPOSITORY=${{ env.ECR_REPOSITORY }}
+            IMAGE_TAG=${{ needs.build-and-push.outputs.image-tag }}
+            GRAFANA_USER=admin
+            GRAFANA_PASSWORD=${{ secrets.GRAFANA_PASSWORD }}
+            EOF
+
+            # ── Pull latest monitoring configs from repo ───────────────────
+            git -C "${APP_DIR}" fetch origin main || true
+            git -C "${APP_DIR}" checkout origin/main -- \
+              monitoring/ docker-compose.yml 2>/dev/null || true
+
+            # ── Rolling update ─────────────────────────────────────────────
+            docker compose pull fastapi-app
+            docker compose up -d --remove-orphans
+
+            # ── Health check ───────────────────────────────────────────────
+            echo "Waiting for app to be healthy..."
+            for i in $(seq 1 12); do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' fastapi-app 2>/dev/null || echo "unknown")
+              echo "  attempt $i/12 — status: ${STATUS}"
+              if [ "${STATUS}" = "healthy" ]; then
+                echo "App is healthy!"
+                break
+              fi
+              sleep 10
+            done
+
+            docker compose ps
+
+      - name: Notify deployment (summary)
+        if: always()
+        run: |
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Tag | \`${{ needs.build-and-push.outputs.image-tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| ECR Registry | \`${{ needs.build-and-push.outputs.ecr-registry }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | \`${{ secrets.EC2_HOST }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY

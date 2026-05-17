@@ -1,0 +1,79 @@
+groups:
+  - name: sre_final_alerts
+    interval: 30s
+    rules:
+
+      # ── HighErrorRate ────────────────────────────────────────────────────
+      # Fires when the HTTP 5xx error rate exceeds 5% over 5 minutes.
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_errors_total{status_code=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total[5m]))
+          ) * 100 > 5
+        for: 5m
+        labels:
+          severity: critical
+          team: sre
+        annotations:
+          summary: "High error rate detected"
+          description: >
+            Error rate is {{ printf "%.2f" $value }}% (threshold 5%) over the
+            last 5 minutes. Check application logs immediately.
+          runbook_url: "https://github.com/KasperSaint07/SRE_final/blob/main/sre/runbook.md#higherrorrate"
+
+      # ── HighLatency ──────────────────────────────────────────────────────
+      # Fires when p99 latency exceeds 500 ms over 5 minutes.
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: sre
+        annotations:
+          summary: "High p99 latency detected"
+          description: >
+            p99 latency is {{ printf "%.3f" $value }}s (threshold 0.5s) over
+            the last 5 minutes.
+          runbook_url: "https://github.com/KasperSaint07/SRE_final/blob/main/sre/runbook.md#highlatency"
+
+      # ── InstanceDown ─────────────────────────────────────────────────────
+      # Fires when any scrape target disappears for more than 1 minute.
+      - alert: InstanceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: sre
+        annotations:
+          summary: "Instance {{ $labels.instance }} is down"
+          description: >
+            Target {{ $labels.job }}/{{ $labels.instance }} has been
+            unreachable for more than 1 minute.
+          runbook_url: "https://github.com/KasperSaint07/SRE_final/blob/main/sre/runbook.md#instancedown"
+
+      # ── ErrorBudgetBurn ──────────────────────────────────────────────────
+      # 99.9% availability SLO → 43 min/month budget.
+      # Fires when short-window burn rate × long-window burn rate both exceed
+      # the threshold (multi-window alerting per Google SRE Workbook).
+      - alert: ErrorBudgetBurn
+        expr: |
+          (
+            sum(rate(http_requests_errors_total[1h]))
+            /
+            sum(rate(http_requests_total[1h]))
+          ) > (1 - 0.999) * 14.4
+        for: 2m
+        labels:
+          severity: critical
+          team: sre
+        annotations:
+          summary: "Error budget burning fast"
+          description: >
+            Current burn rate will exhaust the monthly error budget in less
+            than 5 days. Immediate investigation required.
