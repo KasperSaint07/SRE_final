@@ -152,14 +152,9 @@ jobs:
             GRAFANA_PASSWORD=${{ secrets.GRAFANA_PASSWORD }}
             EOF
 
-            # ── Pull latest monitoring configs from repo ───────────────────
-            git -C "${APP_DIR}" fetch origin main || true
-            git -C "${APP_DIR}" checkout origin/main -- \
-              monitoring/ docker-compose.yml 2>/dev/null || true
-
             # ── Rolling update ─────────────────────────────────────────────
-            docker compose pull fastapi-app
-            docker compose up -d --remove-orphans
+            docker-compose pull fastapi-app
+            docker-compose up -d --remove-orphans
 
             # ── Health check ───────────────────────────────────────────────
             echo "Waiting for app to be healthy..."
@@ -173,7 +168,7 @@ jobs:
               sleep 10
             done
 
-            docker compose ps
+            docker-compose ps
 
       - name: Notify deployment (summary)
         if: always()
