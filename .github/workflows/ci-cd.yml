@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AWS_REGION:      us-east-1
+  AWS_REGION:      eu-central-1
   ECR_REPOSITORY:  sre-final-app
   IMAGE_NAME:      sre-final-app
 
