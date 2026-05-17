@@ -6,7 +6,7 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 
-from app.main import app, _products
+from main import app, _products
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(terraform init *)"
+      "Bash(terraform init *)",
+      "Bash(git commit *)"
     ]
   }
 }
